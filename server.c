@@ -3,6 +3,7 @@
 #include<string.h>
 #include<unistd.h>
 #include<arpa/inet.h>
+#include "protocol.h"
 
 int main(){
     int server_fd = socket(AF_INET,SOCK_STREAM,0);
@@ -34,12 +35,12 @@ int main(){
         return 1;
     }
 
-    char buffer[1024];
-    int n = read(client_fd,buffer,sizeof(buffer)-1);
-    if(n>0){
-        buffer[n]='\0';
-        printf("Recieved: %s\n",buffer);
-        write(client_fd,buffer,n);
+    char buffer[MAX_MSG+1];
+    uint32_t len;
+    int n = recv_message(client_fd,buffer,&len);
+    if(recv_message(client_fd,buffer,&len)==0){
+        printf("Received: %s\n",buffer);
+        send_message(client_fd,buffer,len);
     }
 
     close(client_fd);
