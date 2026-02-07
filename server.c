@@ -35,9 +35,8 @@ int main(){
         return 1;
     }
 
-    char buffer[MAX_MSG+1];
+    char buffer[MAX_MSG + 1];
     uint32_t len;
-    int n = recv_message(client_fd,buffer,&len);
     if(recv_message(client_fd,buffer,&len)==0){
         printf("Received: %s\n",buffer);
         send_message(client_fd,buffer,len);
