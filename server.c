@@ -2,9 +2,20 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/select.h>
+#include <errno.h>
 
 #include "protocol.h"
+#include "client.h"
+
+#define MAX_CLIENTS  FD_SETSIZE
+
+static int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -26,7 +37,11 @@ int main() {
         perror("listen"); return 1;
     }
 
+    set_nonblocking(server_fd);
+
     printf("Server listening on port 8080...\n");
+
+    client_t clients[MAX_CLIENTS] = {0};
 
     fd_set master, read_fds;
     FD_ZERO(&master);
@@ -43,26 +58,73 @@ int main() {
             if (!FD_ISSET(fd, &read_fds)) continue;
 
             if (fd == server_fd) {
-                // New client connection
-                int client_fd = accept(server_fd, NULL, NULL);
-                if (client_fd < 0) { perror("accept"); continue; }
+                // New connection(s)
+                while (1) {
+                    int client_fd = accept(server_fd, NULL, NULL);
+                    if (client_fd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        perror("accept"); break;
+                    }
 
-                FD_SET(client_fd, &master);
-                if (client_fd > fd_max) fd_max = client_fd;
+                    set_nonblocking(client_fd);
+                    FD_SET(client_fd, &master);
+                    if (client_fd > fd_max) fd_max = client_fd;
 
-                printf("New client %d connected\n", client_fd);
+                    clients[client_fd].fd = client_fd;
+                    clients[client_fd].buf_used = 0;
+
+                    printf("New client %d connected\n", client_fd);
+                }
             } else {
-                // Existing client sent data
-                char buffer[MAX_MSG + 1];
-                uint32_t len;
+                // Existing client has data
+                client_t *c = &clients[fd];
+                int done = 0;
 
-                if (recv_message(fd, buffer, &len) == 0) {
-                    printf("Client %d: %s\n", fd, buffer);
-                    send_message(fd, buffer, len);
-                } else {
+                while (1) {
+                    ssize_t r = read(fd, c->buf + c->buf_used, BUF_SIZE - c->buf_used);
+                    if (r > 0) {
+                        c->buf_used += r;
+
+                        // Process full messages inside buffer
+                        int offset = 0;
+                        while (c->buf_used - offset >= 4) {
+                            uint32_t net_len;
+                            memcpy(&net_len, c->buf + offset, 4);
+                            uint32_t len = ntohl(net_len);
+
+                            if (len > MAX_MSG) { done = 1; break; }
+                            if (c->buf_used - offset < (int)(4 + len)) break;
+
+                            char msg[MAX_MSG + 1];
+                            memcpy(msg, c->buf + offset + 4, len);
+                            msg[len] = '\0';
+
+                            printf("Client %d: %s\n", fd, msg);
+                            send_message(fd, msg, len);
+
+                            offset += 4 + len;
+                        }
+
+                        if (offset > 0) {
+                            memmove(c->buf, c->buf + offset, c->buf_used - offset);
+                            c->buf_used -= offset;
+                        }
+                    } else if (r == 0) {
+                        done = 1;
+                        break;
+                    } else {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        done = 1;
+                        break;
+                    }
+                }
+
+                if (done) {
                     printf("Client %d disconnected\n", fd);
                     close(fd);
                     FD_CLR(fd, &master);
+                    clients[fd].fd = 0;
+                    clients[fd].buf_used = 0;
                 }
             }
         }
